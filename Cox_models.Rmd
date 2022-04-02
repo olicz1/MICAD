@@ -1,0 +1,272 @@
+---
+title: "Cox model analysis"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.show='hide', results='hide', include=FALSE}
+library(table1)
+library(kableExtra)
+library(Hmisc)
+source("functions.R")
+source("geodata.R")
+```
+
+
+```{r include=FALSE}
+dat <- read.csv("data/EmCAB_MI_Age copy.csv")
+dat <- left_join(dat, address_income, by='uniqueid')
+dat$hsCRPmgL_Comb <- sapply(dat$hsCRPmgL_Comb, function(i) i + 0.1)
+dat$log_hsCRPmgL_Comb <- log2(dat$hsCRPmgL_Comb)
+dat$log_Gal3ngmL <- log2(dat$Gal3ngmL)
+dat$log_CystCmgL <- log2(dat$CystCmgL)
+dat$log_BNPpgmL_Imp <- log2(dat$BNPpgmL_Imp)
+dat$log_hsTnIpgmL_Comb <- log2(dat$hsTnIpgmL_Comb)
+dat$obese <- ifelse(dat$BMI > 30, 1, 0)
+dat$educ <- sapply(dat$educ, function(i) if(is.na(i)){i} else if(i%%2==0){i-1} else{i})
+
+# fill missing cadage with miage
+dat$cadage[which(is.na(dat$cadage))] <- dat$miage[which(is.na(dat$cadage))]
+```
+
+
+### Part A: MIage as clinical biomarker for MI survival
+
+Data cleaning Procedure and updates: 
+<ul>
+<li>New survival event: MI_CVdeath, MI_CVdeath_CHF</li>
+<li>Added patients to the analysis who have new diagnoses of MI (adm_MI = 1), newly added patient has MIage that is equal to enrollment age. (Is this equal to removing patients that have no MI before or at the time of admission?)</li>
+<li>Removed the Adm_MI and RevascHx history variables for model 3</li>
+<li>More detailed investigation on model 2</li>
+</ul>
+
+MI group selection: 
+<ul>
+<li>New survival event: MI_CVdeath, MI_CVdeath_CHF</li>
+<li>Added patients to the analysis who have new diagnoses of MI (adm_MI = 1), newly added patient has MIage that is equal to enrollment age. (Is this equal to removing patients that have no MI before or at the time of admission?)</li>
+<li>Removed the Adm_MI and RevascHx history variables for model 3</li>
+<li>More detailed investigation on model 2</li>
+</ul>
+
+**1. Table1:**
+
+<center>
+<span style="color: grey;">Table 1</span>
+```{r echo=FALSE}
+interest = "miage"
+dat1 <- generate_table(dat=dat,strat_by = c("miage"), constant = c("age", "male", "Black", "BMI", "Income", "IncomeErrorMargin", "educ", "DM", "HTN", "smokinghx", "adm_AMI", "EF_Impute", "RevascHx", "log_hsCRPmgL_Comb", "log_Gal3ngmL", "log_CystCmgL"))
+
+# Delete patients who did not have history of MI, but keep patients that admitted with MI
+idx <- which(is.na(dat1$Value) & (dat1$adm_AMI==0)) # "dat1$Value" is miage
+#dat1$Value2 <- dat1$Value
+dat1$Value[which(is.na(dat1$Value))] <- dat1$age[which(is.na(dat1$Value))]
+dat1 <- dat1[-idx,]
+dat2 <- dat[-idx,]
+
+dat1$type[which(dat1$male == 1 & dat1$Value >= 50)] <- "Old MI"
+dat1$type[which(dat1$male == 0 & dat1$Value >= 60)] <- "Old MI"
+dat1$type[which(dat1$type == "miage")] <- "Young MI"
+
+# Add label to factors
+dat1$male <- factor(dat1$male, levels = c(0,1), labels = c("Female", "Male"))
+dat1$Black <- factor(dat1$Black, levels = c(0,1), labels = c("Others", "Black"))
+dat1$bmi <- factor(ifelse(dat1$BMI > 30, 1, 0), levels = c(0, 1), labels = c("Not Obese", "Obese"))
+dat1$educ <- factor(dat1$educ, levels = c(1,3,5), labels = c("Not completed High school", "High school diploma but no Bachelor degree", " Finished College or more"))
+dat1$type <- factor(dat1$type, levels = c("Young MI", "Old MI"))
+
+label(dat1$age) <- "Age (years)"
+label(dat1$male) <- "Gender"
+label(dat1$bmi) <- "Is obese?"
+label(dat1$Black) <- "Race"
+label(dat1$educ) <- "Education level"
+
+dat1$MI_CVdeath <- apply(cbind(dat2$MI, dat2$CVdeath), 1, FUN = max)
+dat1$MI_CVdeath_CHF <- apply(cbind(dat2$MI, dat2$CVdeath, dat2$CHF), 1, FUN = max)
+
+dat1$timetoMI_CVdeath <- apply(cbind(dat2$timetoMI, dat2$timetodeath), 1, FUN = min)
+dat1$timetoMI_CVdeath_CHF <- apply(cbind(dat2$timetoMI, dat2$timetodeath, dat2$timetoCHF), 1, FUN = min)
+
+med <- find_median()
+table1(~ age + male + Black + educ + Income + IncomeErrorMargin + bmi + factor(DM) + factor(HTN) + factor(smokinghx) + factor(adm_AMI) + EF_Impute + factor(RevascHx) + log_hsCRPmgL_Comb + log_Gal3ngmL + log_CystCmgL | type, data = dat1,
+       render.categorical = my.render.cat, render.continuous = my.render.cont,
+       overall = NULL, render.missing=NULL,
+       extra.col=list(`P-value`=pvalue))
+```
+</center>
+
+**2. Cox Models:**
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+colnames(dat1)[which(colnames(dat1)=="type")] <- interest
+# Model 1
+surv_univariable(dat1, vars = interest, get_report = T, caption = "Model 1: ")
+
+# Model 2
+surv_univariable(dat=dat1, vars = interest, covariates = c("age", "male", "Black"), show = c("age", "male", "Black"), get_report = T, caption = "Model 2: ")
+surv_univariable(dat=dat1, vars = c("age", "male", "Black"), covariates = interest, show = interest, get_report = T, caption = "Model 2 (More investigation)")
+surv_univariable(dat=dat1, vars = interest, covariates = paste(interest, c("age", "male", "Black"), sep = "*"), show = c("age", "male", "Black"), get_report = T, caption = "Model 2: Interactions")
+surv_univariable(dat=dat1, vars = paste(interest, c("age", "male", "Black"), sep = "*"), covariates = interest, show = c("age", "male", "Black", interest), get_report = T, caption = "Model 2 Interactions")
+
+# Model 3
+surv_univariable(dat1, vars = interest, covariates = c("age", "male", "Black", "DM", "HTN", "bmi", "smokinghx", "EF_Impute"), show = c("age", "male", "Black", "DM", "HTN", "bmi", "smokinghx", "EF_Impute"), get_report = T, caption = "Model 3: ")
+
+# Model 4
+surv_univariable(dat1, vars = interest, covariates = c("age", "male", "Black", "educ", "DM", "HTN", "bmi", "smokinghx", "EF_Impute"), show = c("age", "male", "Black", "educ", "DM", "HTN", "bmi", "smokinghx", "EF_Impute"), get_report = T, caption = "Model 4: ")
+
+# Model 5
+surv_univariable(dat1, vars = interest, covariates = c("age", "male", "Black", "educ", "Income", "IncomeErrorMargin", "DM", "HTN", "bmi", "smokinghx", "EF_Impute"), show = c("age", "male", "Black", "educ", "Income", "IncomeErrorMargin", "DM", "HTN", "bmi", "smokinghx", "EF_Impute"), get_report = T, caption = "Model 5: ")
+
+colnames(dat1)[which(colnames(dat1)==interest)] <- "type"
+```
+
+
+
+### PartB: CAD as clinical biomarker
+
+Data cleaning Procedure: 
+<ul>
+<li>Same as part a</li>
+</ul>
+
+**1. Table1:**
+<center>
+<span style="color: grey;">Table 1</span>
+```{r echo=FALSE}
+interest = "cadage"
+dat1 <- generate_table(dat=dat, strat_by = c("cadage"), constant = c("age", "male", "Black", "BMI", "Income", "IncomeErrorMargin", "educ", "DM", "HTN", "smokinghx", "adm_AMI", "EF_Impute", "RevascHx", "log_hsCRPmgL_Comb", "log_Gal3ngmL", "log_CystCmgL"))
+idx <- which(is.na(dat1$Value) & (dat1$adm_AMI==0))
+dat1$Value[which(is.na(dat1$Value))] <- dat1$age[which(is.na(dat1$Value))]
+dat1 <- dat1[-idx,]
+dat2 <- dat[-idx,]
+dat1$type[which(dat1$male == 1 & dat1$Value >= 50)] <- "Old CAD"
+dat1$type[which(dat1$male == 0 & dat1$Value >= 60)] <- "Old CAD"
+dat1$type[which(dat1$type == "cadage")] <- "Young CAD"
+
+dat1$male <- factor(dat1$male, levels = c(0,1), labels = c("Female", "Male"))
+dat1$Black <- factor(dat1$Black, levels = c(0,1), labels = c("Others", "Black"))
+dat1$bmi <- factor(ifelse(dat1$BMI > 30, 1, 0), levels = c(0, 1), labels = c("Not Obese", "Obese"))
+dat1$educ <- factor(dat1$educ, levels = c(1,3,5), labels = c("Not completed High school", "High school diploma but no Bachelor degree", " Finished College or more"))
+dat1$type <- factor(dat1$type, levels = c("Young CAD", "Old CAD"))
+
+label(dat1$age) <- "Age (years)"
+label(dat1$male) <- "Gender"
+label(dat1$bmi) <- "Is obese?"
+label(dat1$Black) <- "Race"
+label(dat1$educ) <- "Education level"
+
+dat1$MI_CVdeath <- apply(cbind(dat2$MI, dat2$CVdeath), 1, FUN = max)
+dat1$MI_CVdeath_CHF <- apply(cbind(dat2$MI, dat2$CVdeath, dat2$CHF), 1, FUN = max)
+
+dat1$timetoMI_CVdeath <- apply(cbind(dat2$timetoMI, dat2$timetodeath), 1, FUN = min)
+dat1$timetoMI_CVdeath_CHF <- apply(cbind(dat2$timetoMI, dat2$timetodeath, dat2$timetoCHF), 1, FUN = min)
+
+med <- find_median()
+table1(~ age + male + Black + educ + Income + IncomeErrorMargin + bmi + factor(DM) + factor(HTN) + factor(smokinghx) + factor(adm_AMI) + EF_Impute + factor(RevascHx) + log_hsCRPmgL_Comb + log_Gal3ngmL + log_CystCmgL | type, data = dat1,
+       render.categorical = my.render.cat, render.continuous = my.render.cont,
+       overall = NULL, render.missing=NULL,
+       extra.col=list(`P-value`=pvalue))
+```
+</center>
+
+
+**2. Cox Models:**
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+colnames(dat1)[which(colnames(dat1)=="type")] <- interest
+# Model 1
+surv_univariable(dat1, vars = interest, get_report = T, caption = "Model 1: ")
+
+# Model 2
+surv_univariable(dat=dat1, vars = interest, covariates = c("age", "male", "Black"), show = c("age", "male", "Black"), get_report = T, caption = "Model 2: ")
+surv_univariable(dat=dat1, vars = c("age", "male", "Black"), covariates = interest, show = interest, get_report = T, caption = "Model 2 (More investigation)")
+surv_univariable(dat=dat1, vars = interest, covariates = paste(interest, c("age", "male", "Black"), sep = "*"), show = c("age", "male", "Black"), get_report = T, caption = "Model 2: Interactions")
+surv_univariable(dat=dat1, vars = paste(interest, c("age", "male", "Black"), sep = "*"), covariates = interest, show = c("age", "male", "Black", interest), get_report = T, caption = "Model 2 Interactions")
+
+# Model 3
+surv_univariable(dat1, vars = interest, covariates = c("age", "male", "Black", "DM", "HTN", "bmi", "smokinghx", "EF_Impute"), show = c("age", "male", "Black", "DM", "HTN", "bmi", "smokinghx", "EF_Impute"), get_report = T, caption = "Model 3: ")
+
+# Model 4
+surv_univariable(dat1, vars = interest, covariates = c("age", "male", "Black", "educ", "DM", "HTN", "bmi", "smokinghx", "EF_Impute"), show = c("age", "male", "Black", "educ", "DM", "HTN", "bmi", "smokinghx", "EF_Impute"), get_report = T, caption = "Model 4: ")
+
+# Model 5
+surv_univariable(dat1, vars = interest, covariates = c("age", "male", "Black", "educ", "Income", "IncomeErrorMargin", "DM", "HTN", "bmi", "smokinghx", "EF_Impute"), show = c("age", "male", "Black", "educ", "Income", "IncomeErrorMargin", "DM", "HTN", "bmi", "smokinghx", "EF_Impute"), get_report = T, caption = "Model 5: ")
+
+colnames(dat1)[which(colnames(dat1)==interest)] <- "type"
+```
+
+### Part C: Excluding patient with ADM_MI = 1, adding BNP and troponin
+
+Data cleaning Procedure and updates: 
+<ul>
+<li>Remove patients with 1.acute MI Adm_MI=1 or 2.no MI at all before or at the time of admission</li>
+<li>added BNP and troponin as variable</li>
+<li>not sure about what interaction to test for, might need to meet to resolve this issue</li>
+</ul>
+
+**1. Table1:**
+
+<center>
+<span style="color: grey;">Table 1</span>
+```{r echo=FALSE}
+interest = "miage"
+dat1 <- generate_table(dat=dat,strat_by = c("miage"), constant = c("age", "male", "Black", "BMI", "educ", "DM", "HTN", "smokinghx", "adm_AMI", "EF_Impute", "RevascHx", "log_hsCRPmgL_Comb", "log_Gal3ngmL", "log_CystCmgL", "log_BNPpgmL_Imp", "log_hsTnIpgmL_Comb"))
+
+
+idx <- which(dat1$adm_AMI==1 | (is.na(dat1$Value) & (dat1$adm_AMI==0))) # "dat1$Value" is miage
+dat1$Value[which(is.na(dat1$Value))] <- dat1$age[which(is.na(dat1$Value))]
+dat1 <- dat1[-idx,]
+dat2 <- dat[-idx,]
+
+dat1$type[which(dat1$male == 1 & dat1$Value >= 50)] <- "Old MI"
+dat1$type[which(dat1$male == 0 & dat1$Value >= 60)] <- "Old MI"
+dat1$type[which(dat1$type == "miage")] <- "Young MI"
+
+# Add label to factors
+dat1$male <- factor(dat1$male, levels = c(0,1), labels = c("Female", "Male"))
+dat1$Black <- factor(dat1$Black, levels = c(0,1), labels = c("Others", "Black"))
+dat1$bmi <- factor(ifelse(dat1$BMI > 30, 1, 0), levels = c(0, 1), labels = c("Not Obese", "Obese"))
+dat1$educ <- factor(dat1$educ, levels = c(1,3,5), labels = c("Not completed High school", "High school diploma but no Bachelor degree", " Finished College or more"))
+dat1$type <- factor(dat1$type, levels = c("Young MI", "Old MI"))
+
+label(dat1$age) <- "Age (years)"
+label(dat1$male) <- "Gender"
+label(dat1$bmi) <- "Is obese?"
+label(dat1$Black) <- "Race"
+label(dat1$educ) <- "Education level"
+
+dat1$MI_CVdeath <- apply(cbind(dat2$MI, dat2$CVdeath), 1, FUN = max)
+dat1$MI_CVdeath_CHF <- apply(cbind(dat2$MI, dat2$CVdeath, dat2$CHF), 1, FUN = max)
+
+dat1$timetoMI_CVdeath <- apply(cbind(dat2$timetoMI, dat2$timetodeath), 1, FUN = min)
+dat1$timetoMI_CVdeath_CHF <- apply(cbind(dat2$timetoMI, dat2$timetodeath, dat2$timetoCHF), 1, FUN = min)
+
+med <- find_median(var_name = c("log_hsCRPmgL_Comb", "log_Gal3ngmL", "log_CystCmgL", "log_BNPpgmL_Imp", "log_hsTnIpgmL_Comb"))
+table1(~ age + male + Black + educ + bmi + factor(DM) + factor(HTN) + factor(smokinghx) + EF_Impute + factor(RevascHx) + log_hsCRPmgL_Comb + log_Gal3ngmL + log_CystCmgL + log_BNPpgmL_Imp +log_hsTnIpgmL_Comb | type, data = dat1,
+       render.categorical = my.render.cat, render.continuous = my.render.cont,
+       overall = NULL, render.missing=NULL,
+       extra.col=list(`P-value`=pvalue))
+```
+</center>
+
+**2. Cox Models:**
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+colnames(dat1)[which(colnames(dat1)=="type")] <- interest
+# Model 1
+surv_univariable(dat1, vars = c(interest, "log_BNPpgmL_Imp", "log_hsTnIpgmL_Comb"), get_report = T, caption = "MIage, BNP, Troponin- univariable analysis")
+surv_univariable(dat1, vars = c(interest, "log_BNPpgmL_Imp", "log_hsTnIpgmL_Comb"), covariates = c("age", "male", "Black"), show = c("age", "male", "Black"), get_report = T, caption = "MIage, BNP, Troponin- univariable analysis (adjusted)") # adjusted
+
+# Model 2
+surv_univariable(dat1, vars = c(interest), covariates = c("log_BNPpgmL_Imp", "log_hsTnIpgmL_Comb"), show = c("log_BNPpgmL_Imp", "log_hsTnIpgmL_Comb"), get_report = T, caption = "MIage, BNP, Troponin in the same model")
+surv_univariable(dat1, vars = c(interest), covariates = c("log_BNPpgmL_Imp", "log_hsTnIpgmL_Comb","age", "male", "Black"), show = c("log_BNPpgmL_Imp", "log_hsTnIpgmL_Comb","age", "male", "Black"), get_report = T, caption = "MIage, BNP, Troponin in the same model (adjusted)") # adjusted
+
+# Model 3
+surv_univariable(dat1, vars = c(interest), covariates = c(paste(interest,"*age"), paste(interest,"*male"), paste(interest,"*Black")), show = c(interest, "log_BNPpgmL_Imp", "log_hsTnIpgmL_Comb"), get_report = T, caption = "MIage (interaction)")
+surv_univariable(dat1, vars = c("log_BNPpgmL_Imp"), covariates = c("log_BNPpgmL_Imp*age", "log_BNPpgmL_Imp*male", "log_BNPpgmL_Imp*Black"), show = c("log_BNPpgmL_Imp"), get_report = T, caption = "BNP (interaction)")
+surv_univariable(dat1, vars = c("log_hsTnIpgmL_Comb"), covariates = c("log_hsTnIpgmL_Comb*age", "log_hsTnIpgmL_Comb*male", "log_hsTnIpgmL_Comb*Black"), show = c("log_BNPpgmL_Imp"), get_report = T, caption = "Troponin (interaction)")
+
+
+colnames(dat1)[which(colnames(dat1)==interest)] <- "type"
+```
+
+

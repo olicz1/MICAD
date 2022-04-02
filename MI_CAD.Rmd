@@ -1,0 +1,395 @@
+---
+title: "MI_CAD analysis"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.show='hide', results='hide', include=FALSE}
+library(table1)
+library(kableExtra)
+library(Hmisc)
+source("functions.R")
+```
+
+
+```{r include=FALSE}
+dat <- read.csv("data/EmCAB_MI_Age.csv")
+dat$hsCRPmgL_Comb <- sapply(dat$hsCRPmgL_Comb, function(i) i + 0.1)
+dat$log_hsCRPmgL_Comb <- log2(dat$hsCRPmgL_Comb)
+dat$log_Gal3ngmL <- log2(dat$Gal3ngmL)
+dat$log_CystCmgL <- log2(dat$CystCmgL)
+dat$obese <- ifelse(dat$BMI > 30, 1, 0)
+dat$educ <- sapply(dat$educ, function(i) if(is.na(i)){i} else if(i%%2==0){i-1} else{i})
+
+# fill missing cadage with miage
+dat$cadage[which(is.na(dat$cadage))] <- dat$miage[which(is.na(dat$cadage))]
+```
+
+
+### Part A: Analysis for MI
+**1. Table1:**
+
+<center>
+<span style="color: grey;">Table 1</span>
+```{r echo=FALSE}
+interest = "miage_cat"
+dat1 <- generate_table(dat=dat,strat_by = c("miage"), constant = c("age", "male", "Black", "BMI", "educ", "DM", "HTN", "smokinghx", "adm_AMI", "EF_Impute", "RevascHx", "log_hsCRPmgL_Comb", "log_Gal3ngmL", "log_CystCmgL"))
+
+# Delete patients who did not have history of MI, but keep patients that admitted with MI
+idx <- which(is.na(dat1$Value) & (dat1$adm_AMI==1)) # "dat1$Value" is miage
+dat1$Value[which(is.na(dat1$Value))] <- dat1$age[which(is.na(dat1$Value))]
+dat1 <- dat1[-idx,]
+dat2 <- dat[-idx,]
+
+dat1$type[which(dat1$male == 1 & dat1$Value >= 50)] <- "Old MI"
+dat1$type[which(dat1$male == 0 & dat1$Value >= 60)] <- "Old MI"
+dat1$type[which(dat1$type == "miage")] <- "Young MI"
+
+# Add label to factors
+dat1$male <- factor(dat1$male, levels = c(0,1), labels = c("Female", "Male"))
+dat1$Black <- factor(dat1$Black, levels = c(0,1), labels = c("Others", "Black"))
+dat1$bmi <- factor(ifelse(dat1$BMI > 30, 1, 0), levels = c(0, 1), labels = c("Not Obese", "Obese"))
+dat1$educ <- factor(dat1$educ, levels = c(1,3,5), labels = c("Not completed High school", "High school diploma but no Bachelor degree", " Finished College or more"))
+dat1$type <- factor(dat1$type, levels = c("Young MI", "Old MI"))
+
+label(dat1$age) <- "Age (years)"
+label(dat1$male) <- "Gender"
+label(dat1$bmi) <- "Is obese?"
+label(dat1$Black) <- "Race"
+label(dat1$educ) <- "Education level"
+
+med <- find_median()
+table1(~ age + male + Black + educ + bmi + factor(DM) + factor(HTN) + factor(smokinghx) + factor(adm_AMI) + EF_Impute + factor(RevascHx) + log_hsCRPmgL_Comb + log_Gal3ngmL + log_CystCmgL | type, data = dat1,
+       render.categorical = my.render.cat, render.continuous = my.render.cont,
+       overall = NULL, render.missing=NULL,
+       extra.col=list(`P-value`=pvalue))
+```
+</center>
+
+**Correlations:**
+
+<center>
+```{r echo=FALSE, warning=FALSE, message=FALSE, results='hide'}
+eee <- dat1[which(complete.cases(dat1[c("log_hsCRPmgL_Comb", "log_Gal3ngmL", "log_CystCmgL")])),c("log_hsCRPmgL_Comb", "log_Gal3ngmL", "log_CystCmgL")]
+chart(eee,histogram = T,method = "pearson")
+```
+
+</center>
+
+**Box plots:**
+<center>
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+bxp1<-boxplot.custom(dat = dat1, value = "log_hsCRPmgL_Comb", name = "type", title = "hsCRP", x_lab = "MI status")
+bxp2<-boxplot.custom(dat = dat1, value = "log_Gal3ngmL", name = "type", title = "Galactin",x_lab = "MI status")
+bxp3<-boxplot.custom(dat = dat1, value = "log_CystCmgL", name = "type", title = "Cystatin",x_lab = "MI status")
+ggarrange(bxp1,bxp2,bxp3)
+```
+</center>
+
+**Linear Models:**
+
+```{r echo=FALSE}
+colnames(dat1)[which(colnames(dat1)=="type")] <- interest
+lm_univariable(c("log_hsCRPmgL_Comb", "log_Gal3ngmL", "log_CystCmgL"), c(interest), dat1)
+colnames(dat1)[which(colnames(dat1)==interest)] <- "type"
+```
+
+
+
+```{r include=FALSE}
+dat1$MI_CVdeath <- apply(cbind(dat2$MI, dat2$CVdeath), 1, FUN = max)
+dat1$MI_CVdeath_CHF <- apply(cbind(dat2$MI, dat2$CVdeath, dat2$CHF), 1, FUN = max)
+
+dat1$timetoMI_CVdeath <- apply(cbind(dat2$timetoMI, dat2$timetodeath), 1, FUN = min)
+dat1$timetoMI_CVdeath_CHF <- apply(cbind(dat2$timetoMI, dat2$timetodeath, dat2$timetoCHF), 1, FUN = min)
+```
+
+
+**2. Survival:**
+<center>
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+library(survminer)
+library(survival)
+graph_list <- vector(mode = "list", length = 1)
+length = 1
+for (i in c("type")){
+  level <- dat1[,which(names(dat1)==i)]
+  fit <- survfit(Surv(timetoMI_CVdeath, MI_CVdeath) ~ level, data = dat1)
+  graph_list[[length]] <- ggsurvplot(fit, title = i, pval = TRUE, risk.table = TRUE, risk.table.height = 0.4, censor=FALSE, pval.coord = c(0, 0.8))
+  length = length+1
+}
+graph_list[[1]]
+```
+</center>
+
+
+**3. Cox Models:**
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+outcome2 <- c("timetoMI_CVdeath_CHF", "MI_CVdeath_CHF")
+colnames(dat1)[which(colnames(dat1)=="type")] <- interest
+
+P.model1 <- cbind(surv_univariable(dat1, vars = interest),
+      surv_univariable(dat1, vars = interest, outcome = outcome2))
+
+P.model2 <- cbind(
+  surv_univariable(dat1, vars = interest, covariates = c("age", "male", "Black"), show = c("age", "male", "Black")),
+  surv_univariable(dat1, vars = interest, covariates = c("age", "male", "Black"), outcome = outcome2, show = c("age", "male", "Black")))
+
+P.model3 <- cbind(
+  surv_univariable(dat1, vars = interest, covariates = c("age", "male", "Black", "DM", "HTN", "bmi", "smokinghx", "EF_Impute")),
+  surv_univariable(dat1, vars = interest, covariates = c("age", "male", "Black", "DM", "HTN", "bmi", "smokinghx", "EF_Impute"), outcome = outcome2))
+
+P.model4 <- cbind(
+  surv_univariable(dat1, vars = interest, covariates = c("age", "male", "Black", "educ", "DM", "HTN", "bmi", "smokinghx", "EF_Impute")),
+  surv_univariable(dat1, vars = interest, covariates = c("age", "male", "Black", "educ", "DM", "HTN", "bmi", "smokinghx", "EF_Impute"), outcome = outcome2))
+
+rownames(P.model1)[1] <- "Old MI vs Young MI"
+rownames(P.model2)[1] <- "Old MI vs Young MI"
+rownames(P.model3)[1] <- "Old MI vs Young MI"
+rownames(P.model4)[1] <- "Old MI vs Young MI"
+
+graph_HR_table(P.model1, "Model 1: unadjusted")
+graph_HR_table(P.model2, "Model 2: Adjusted for age, sex, race (black vs. non-black)")
+graph_HR_table(P.model3, "Model 3: Model 2 + DM, HTN, obesity (BMI>30), smoking history, Adm_MI, EF_Impute, RevascHx")
+graph_HR_table(P.model4, "Model 4: Model 3 + education (table1)")
+
+colnames(dat1)[which(colnames(dat1)==interest)] <- "type"
+```
+
+
+### PartB: Analysis for CAD
+**1. Table1:**
+Procedure: Add patients to the analysis who have new diagnoses of CAD
+<center>
+<span style="color: grey;">Table 1</span>
+```{r echo=FALSE}
+interest = "cadage"
+dat1 <- generate_table(dat=dat, strat_by = c("cadage"), constant = c("age", "male", "Black", "BMI", "educ", "DM", "HTN", "smokinghx", "adm_AMI", "EF_Impute", "RevascHx", "log_hsCRPmgL_Comb", "log_Gal3ngmL", "log_CystCmgL"))
+idx <- which(is.na(dat1$Value) & (dat1$adm_AMI==1))
+dat1$Value[which(is.na(dat1$Value))] <- dat1$age[which(is.na(dat1$Value))]
+dat1 <- dat1[-idx,]
+dat2 <- dat[-idx,]
+dat1$type[which(dat1$male == 1 & dat1$Value >= 50)] <- "Old CAD"
+dat1$type[which(dat1$male == 0 & dat1$Value >= 60)] <- "Old CAD"
+dat1$type[which(dat1$type == "cadage")] <- "Young CAD"
+
+dat1$male <- factor(dat1$male, levels = c(0,1), labels = c("Female", "Male"))
+dat1$Black <- factor(dat1$Black, levels = c(0,1), labels = c("Others", "Black"))
+dat1$bmi <- factor(ifelse(dat1$BMI > 30, 1, 0), levels = c(0, 1), labels = c("Not Obese", "Obese"))
+dat1$educ <- factor(dat1$educ, levels = c(1,3,5), labels = c("Not completed High school", "High school diploma but no Bachelor degree", " Finished College or more"))
+dat1$type <- factor(dat1$type, levels = c("Young CAD", "Old CAD"))
+
+label(dat1$age) <- "Age (years)"
+label(dat1$male) <- "Gender"
+label(dat1$bmi) <- "Is obese?"
+label(dat1$Black) <- "Race"
+label(dat1$educ) <- "Education level"
+
+med <- find_median()
+table1(~ age + male + Black + educ + bmi + factor(DM) + factor(HTN) + factor(smokinghx) + factor(adm_AMI) + EF_Impute + factor(RevascHx) + log_hsCRPmgL_Comb + log_Gal3ngmL + log_CystCmgL | type, data = dat1,
+       render.categorical = my.render.cat, render.continuous = my.render.cont,
+       overall = NULL, render.missing=NULL,
+       extra.col=list(`P-value`=pvalue))
+```
+</center>
+
+**Box plots:**
+<center>
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+bxp1<-boxplot.custom(dat = dat1, value = "log_hsCRPmgL_Comb", name = "type", title = "hsCRP", x_lab = "MI status")
+bxp2<-boxplot.custom(dat = dat1, value = "log_Gal3ngmL", name = "type", title = "Galactin",x_lab = "MI status")
+bxp3<-boxplot.custom(dat = dat1, value = "log_CystCmgL", name = "type", title = "Cystatin",x_lab = "MI status")
+ggarrange(bxp1,bxp2,bxp3)
+```
+</center>
+
+**Linear Models:**
+
+```{r echo=FALSE}
+colnames(dat1)[which(colnames(dat1)=="type")] <- interest
+lm_univariable(c("log_hsCRPmgL_Comb", "log_Gal3ngmL", "log_CystCmgL"), c(interest), dat1)
+colnames(dat1)[which(colnames(dat1)==interest)] <- "type"
+```
+
+
+
+
+```{r include=FALSE}
+dat1$MI_CVdeath <- apply(cbind(dat2$MI, dat2$CVdeath), 1, FUN = max)
+dat1$MI_CVdeath_CHF <- apply(cbind(dat2$MI, dat2$CVdeath, dat2$CHF), 1, FUN = max)
+
+dat1$timetoMI_CVdeath <- apply(cbind(dat2$timetoMI, dat2$timetodeath), 1, FUN = min)
+dat1$timetoMI_CVdeath_CHF <- apply(cbind(dat2$timetoMI, dat2$timetodeath, dat2$timetoCHF), 1, FUN = min)
+```
+
+
+**2. Survival:**
+<center>
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+library(survminer)
+library(survival)
+graph_list <- vector(mode = "list", length = 1)
+length = 1
+for (i in c("type")){
+  level <- dat1[,which(names(dat1)==i)]
+  fit <- survfit(Surv(timetoMI_CVdeath, MI_CVdeath) ~ level, data = dat1)
+  graph_list[[length]] <- ggsurvplot(fit, title = i, pval = TRUE, risk.table = TRUE, risk.table.height = 0.4, ylim=c(0.7,1), xlim=c(0,3000), censor=FALSE, pval.coord = c(0, 0.8))
+  length = length+1
+}
+graph_list[[1]]
+```
+</center>
+
+
+**3. Cox Models:**
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+outcome2 <- c("timetoMI_CVdeath_CHF", "MI_CVdeath_CHF")
+colnames(dat1)[which(colnames(dat1)=="type")] <- interest
+
+P.model1 <- cbind(surv_univariable(dat1, vars = interest),
+      surv_univariable(dat1, vars = interest, outcome = outcome2))
+
+P.model2 <- cbind(
+  surv_univariable(dat1, vars = interest, covariates = c("age", "male", "Black"), show = c("age", "male", "Black")),
+  surv_univariable(dat1, vars = interest, covariates = c("age", "male", "Black"), outcome = outcome2, show = c("age", "male", "Black")))
+
+P.model3 <- cbind(
+  surv_univariable(dat1, vars = interest, covariates = c("age", "male", "Black", "DM", "HTN", "bmi", "smokinghx", "EF_Impute")),
+  surv_univariable(dat1, vars = interest, covariates = c("age", "male", "Black", "DM", "HTN", "bmi", "smokinghx", "EF_Impute"), outcome = outcome2))
+
+P.model4 <- cbind(
+  surv_univariable(dat1, vars = interest, covariates = c("age", "male", "Black", "educ", "DM", "HTN", "bmi", "smokinghx", "EF_Impute")),
+  surv_univariable(dat1, vars = interest, covariates = c("age", "male", "Black", "educ", "DM", "HTN", "bmi", "smokinghx", "EF_Impute"), outcome = outcome2))
+
+rownames(P.model1) <- "Old CAD vs Young CAD"
+rownames(P.model2)[1] <- "Old MI vs Young MI"
+rownames(P.model3) <- "Old CAD vs Young CAD"
+rownames(P.model4) <- "Old CAD vs Young CAD"
+
+graph_HR_table(P.model1, "Model 1: unadjusted")
+graph_HR_table(P.model2, "Model 2: Adjusted for age sex, race (black vs. non-black)")
+graph_HR_table(P.model3, "Model 3: Model 2 + DM, HTN, obesity (BMI>30), smoking history, Adm_MI, EF_Impute, RevascHx")
+graph_HR_table(P.model4, "Model 4: Model 3 + education (table1)")
+
+colnames(dat1)[which(colnames(dat1)==interest)] <- "type"
+```
+
+
+
+### PartC: Analysis for CAD
+**1. Table1:**
+
+<center>
+<span style="color: grey;">Table 1</span>
+```{r echo=FALSE}
+interest = "cadage"
+dat1 <- generate_table(dat=dat, strat_by = c("cadage"), constant = c("age", "male", "Black", "BMI", "educ", "DM", "HTN", "smokinghx", "adm_AMI", "EF_Impute", "RevascHx", "log_hsCRPmgL_Comb", "log_Gal3ngmL", "log_CystCmgL"))
+idx <- which(is.na(dat1$Value) & (dat1$adm_AMI==1))
+dat1$Value[which(is.na(dat1$Value))] <- dat1$age[which(is.na(dat1$Value))]
+dat1 <- dat1[-idx,]
+dat2 <- dat[-idx,]
+dat1$type[which(dat1$male == 1 & dat1$Value >= 50)] <- "Old CAD"
+dat1$type[which(dat1$male == 0 & dat1$Value >= 60)] <- "Old CAD"
+dat1$type[which(dat1$type == "cadage")] <- "Young CAD"
+
+dat1$male <- factor(dat1$male, levels = c(0,1), labels = c("Female", "Male"))
+dat1$Black <- factor(dat1$Black, levels = c(0,1), labels = c("Others", "Black"))
+dat1$bmi <- factor(ifelse(dat1$BMI > 30, 1, 0), levels = c(0, 1), labels = c("Not Obese", "Obese"))
+dat1$educ <- factor(dat1$educ, levels = c(1,3,5), labels = c("Not completed High school", "High school diploma but no Bachelor degree", " Finished College or more"))
+dat1$type <- factor(dat1$type, levels = c("Young CAD", "Old CAD"))
+
+label(dat1$age) <- "Age (years)"
+label(dat1$male) <- "Gender"
+label(dat1$bmi) <- "Is obese?"
+label(dat1$Black) <- "Race"
+label(dat1$educ) <- "Education level"
+
+med <- find_median()
+table1(~ age + male + Black + educ + bmi + factor(DM) + factor(HTN) + factor(smokinghx) + factor(adm_AMI) + EF_Impute + factor(RevascHx) + log_hsCRPmgL_Comb + log_Gal3ngmL + log_CystCmgL | type, data = dat1,
+       render.categorical = my.render.cat, render.continuous = my.render.cont,
+       overall = NULL, render.missing=NULL,
+       extra.col=list(`P-value`=pvalue))
+```
+</center>
+
+**Box plots:**
+<center>
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+bxp1<-boxplot.custom(dat = dat1, value = "log_hsCRPmgL_Comb", name = "type", title = "hsCRP", x_lab = "MI status")
+bxp2<-boxplot.custom(dat = dat1, value = "log_Gal3ngmL", name = "type", title = "Galactin",x_lab = "MI status")
+bxp3<-boxplot.custom(dat = dat1, value = "log_CystCmgL", name = "type", title = "Cystatin",x_lab = "MI status")
+ggarrange(bxp1,bxp2,bxp3)
+```
+</center>
+
+**Linear Models:**
+
+```{r echo=FALSE}
+colnames(dat1)[which(colnames(dat1)=="type")] <- interest
+lm_univariable(c("log_hsCRPmgL_Comb", "log_Gal3ngmL", "log_CystCmgL"), c(interest), dat1)
+colnames(dat1)[which(colnames(dat1)==interest)] <- "type"
+```
+
+
+
+
+```{r include=FALSE}
+dat1$MI_CVdeath <- apply(cbind(dat2$MI, dat2$CVdeath), 1, FUN = max)
+dat1$MI_CVdeath_CHF <- apply(cbind(dat2$MI, dat2$CVdeath, dat2$CHF), 1, FUN = max)
+
+dat1$timetoMI_CVdeath <- apply(cbind(dat2$timetoMI, dat2$timetodeath), 1, FUN = min)
+dat1$timetoMI_CVdeath_CHF <- apply(cbind(dat2$timetoMI, dat2$timetodeath, dat2$timetoCHF), 1, FUN = min)
+```
+
+
+**2. Survival:**
+<center>
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+library(survminer)
+library(survival)
+graph_list <- vector(mode = "list", length = 1)
+length = 1
+for (i in c("type")){
+  level <- dat1[,which(names(dat1)==i)]
+  fit <- survfit(Surv(timetoMI_CVdeath, MI_CVdeath) ~ level, data = dat1)
+  graph_list[[length]] <- ggsurvplot(fit, title = i, pval = TRUE, risk.table = TRUE, risk.table.height = 0.4, ylim=c(0.7,1), xlim=c(0,3000), censor=FALSE, pval.coord = c(0, 0.8))
+  length = length+1
+}
+graph_list[[1]]
+```
+</center>
+
+
+**3. Cox Models:**
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+colnames(dat1)[which(colnames(dat1)=="type")] <- interest
+P.model1 <- cbind(surv_univariable(dat1, vars = interest),
+      surv_univariable(dat1, vars = interest, outcome = "aaa"))
+P.model2 <- cbind(surv_univariable(dat1, vars = interest, covariates = c("age", "male", "Black"), num_row = 4),
+      surv_univariable(dat1, vars = interest, covariates = c("age", "male", "Black"), outcome = "aaa", num_row = 4))
+P.model3 <- cbind(surv_univariable(dat1, vars = interest, covariates = c("age", "male", "Black", "DM", "HTN", "bmi", "smokinghx", "EF_Impute")),
+      surv_univariable(dat1, vars = interest, covariates = c("age", "male", "Black", "DM", "HTN", "bmi", "smokinghx", "EF_Impute"), outcome = "aaa"))
+P.model4 <- cbind(surv_univariable(dat1, vars = interest, covariates = c("age", "male", "Black", "educ", "DM", "HTN", "bmi", "smokinghx", "EF_Impute")),
+      surv_univariable(dat1, vars = interest, covariates = c("age", "male", "Black", "educ", "DM", "HTN", "bmi", "smokinghx", "EF_Impute"), outcome = "aaa"))
+
+rownames(P.model1) <- "Old CAD vs Young CAD"
+rownames(P.model2)[1] <- "Old MI vs Young MI"
+rownames(P.model3) <- "Old CAD vs Young CAD"
+rownames(P.model4) <- "Old CAD vs Young CAD"
+
+graph_HR_table(P.model1, "Model 1: unadjusted")
+graph_HR_table(P.model2, "Model 2: Adjusted for age sex, race (black vs. non-black)")
+graph_HR_table(P.model3, "Model 3: Model 2 + DM, HTN, obesity (BMI>30), smoking history, EF_Impute, RevascHx")
+graph_HR_table(P.model4, "Model 4: Model 3 + education (table1)")
+
+colnames(dat1)[which(colnames(dat1)==interest)] <- "type"
+```
+
+
+
